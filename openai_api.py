@@ -102,7 +102,6 @@ async def list_models():
 async def create_chat_completion(request: ChatCompletionRequest):
     global model, tokenizer
 
-    print(request.do_sample)
     if request.do_sample == 0:
         # 效果上相当于 top_p=0 或 temperature=0
         model.generation_config.do_sample = False # greedy decoding
