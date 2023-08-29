@@ -18,7 +18,7 @@ from sse_starlette.sse import ServerSentEvent, EventSourceResponse
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI): # collects GPU memory
+async def lifespan(app: FastAPI):  # collects GPU memory
     yield
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -69,6 +69,7 @@ class ChatCompletionRequest(BaseModel):
     max_length: Optional[int] = None
     stream: Optional[bool] = False
     stop: Optional[List[str]] = []
+    do_sample: Optional[int] = 1
 
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -101,38 +102,47 @@ async def list_models():
 async def create_chat_completion(request: ChatCompletionRequest):
     global model, tokenizer
 
+    print(request.do_sample)
+    if request.do_sample == 0:
+        # 效果上相当于 top_p=0 或 temperature=0
+        model.generation_config.do_sample = False # greedy decoding
+
     if request.messages[-1].role != "user":
-        raise HTTPException(status_code=400, detail="Invalid request")
+        raise HTTPException(status_code=400, detail="未找到用户消息")
     query = request.messages[-1].content
     stop_words = request.stop
     stop_words.extend(list(map(lambda x: x[1:], filter(lambda x: x.startswith("\n"), stop_words))))
     prev_messages = request.messages[:-1]
     # Temporarily, the system role does not work as expected. We advise that you write the setups for role-play in your query.
-    # if len(prev_messages) > 0 and prev_messages[0].role == "system":
-    #     query = prev_messages.pop(0).content + query
+    if len(prev_messages) > 0 and prev_messages[0].role == "system":
+        query = prev_messages.pop(0).content + query
 
     history = []
     if len(prev_messages) % 2 == 0:
         for i in range(0, len(prev_messages), 2):
-            if prev_messages[i].role == "user" and prev_messages[i+1].role == "assistant":
-                history.append([prev_messages[i].content, prev_messages[i+1].content])
+            if prev_messages[i].role == "user" and prev_messages[i + 1].role == "assistant":
+                history.append([prev_messages[i].content, prev_messages[i + 1].content])
             else:
-                raise HTTPException(status_code=400, detail="Invalid request.")
+                raise HTTPException(status_code=400, detail="消息体参数异常")
     else:
-        raise HTTPException(status_code=400, detail="Invalid request.")
+        raise HTTPException(status_code=400, detail="消息体异常")
 
     if request.stream:
-        generate = predict(query, history, request.model, stop_words)
+        generate = predict(query, history, request.model, stop_words, top_p=request.top_p,
+                           temperature=request.temperature)
         return EventSourceResponse(generate, media_type="text/event-stream")
 
     if stop_words:
         react_stop_words_tokens = [tokenizer.encode(stop_) for stop_ in stop_words]
-        response, _ = model.chat(tokenizer, query, history=history, stop_words_ids=react_stop_words_tokens)
+        response, _ = model.chat(tokenizer, query, history=history, stop_words_ids=react_stop_words_tokens,
+                                 top_p=request.top_p,
+                                 temperature=request.temperature)
         for stop_ in stop_words:
             if response.endswith(stop_):
                 response = response[:response.find(stop_)]
     else:
-        response, _ = model.chat(tokenizer, query, history=history)
+        response, _ = model.chat(tokenizer, query, history=history, top_p=request.top_p,
+                                 temperature=request.temperature)
 
     choice_data = ChatCompletionResponseChoice(
         index=0,
@@ -143,7 +153,8 @@ async def create_chat_completion(request: ChatCompletionRequest):
     return ChatCompletionResponse(model=request.model, choices=[choice_data], object="chat.completion")
 
 
-async def predict(query: str, history: List[List[str]], model_id: str, stop_words: List[str]):
+async def predict(query: str, history: List[List[str]], model_id: str, stop_words: List[str], top_p: float = 0.5,
+                  temperature: float = 0.65):
     global model, tokenizer
     assert stop_words == [], "in stream format, stop word is output"
     choice_data = ChatCompletionResponseStreamChoice(
@@ -157,9 +168,13 @@ async def predict(query: str, history: List[List[str]], model_id: str, stop_word
     current_length = 0
     if stop_words:
         react_stop_words_tokens = [tokenizer.encode(stop_) for stop_ in stop_words]
-        response_generator = model.chat_stream(tokenizer, query, history=history, stop_words_ids=react_stop_words_tokens)
+        response_generator = model.chat_stream(tokenizer, query, history=history,
+                                               top_p=top_p,
+                                               temperature=temperature,
+                                               stop_words_ids=react_stop_words_tokens)
     else:
-        response_generator = model.chat_stream(tokenizer, query, history=history)
+        response_generator = model.chat_stream(tokenizer, query, history=history, top_p=top_p,
+                                               temperature=temperature, )
 
     for new_response in response_generator:
         if len(new_response) == current_length:
@@ -176,7 +191,6 @@ async def predict(query: str, history: List[List[str]], model_id: str, stop_word
         chunk = ChatCompletionResponse(model=model_id, choices=[choice_data], object="chat.completion.chunk")
         yield "{}".format(chunk.model_dump_json(exclude_unset=True))
 
-
     choice_data = ChatCompletionResponseStreamChoice(
         index=0,
         delta=DeltaMessage(),
@@ -186,14 +200,15 @@ async def predict(query: str, history: List[List[str]], model_id: str, stop_word
     yield "{}".format(chunk.model_dump_json(exclude_unset=True))
     yield '[DONE]'
 
+
 def _get_args():
     parser = ArgumentParser()
-    parser.add_argument("-c", "--checkpoint-path", type=str, default='QWen/QWen-7B-Chat',
+    parser.add_argument("-c", "--checkpoint-path", type=str, default='models/Qwen-7B-Chat',
                         help="Checkpoint name or path, default to %(default)r")
     parser.add_argument("--cpu-only", action="store_true", help="Run demo with CPU only")
     parser.add_argument("--server-port", type=int, default=8000,
                         help="Demo server port.")
-    parser.add_argument("--server-name", type=str, default="127.0.0.1",
+    parser.add_argument("--server-name", type=str, default="0.0.0.0",
                         help="Demo server name.")
 
     args = parser.parse_args()

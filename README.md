@@ -331,7 +331,10 @@ response = openai.ChatCompletion.create(
         {"role": "user", "content": "你好"}
     ],
     stream=False,
-    stop=[] # You can add custom stop words here, e.g., stop=["Observation:"] for ReAct prompting.
+    stop=[], # You can add custom stop words here, e.g., stop=["Observation:"] for ReAct prompting.
+    top_p=0.5, # You can also add other parameters here.
+    temperature=0.65, # You can also add other parameters here.
+    do_sample=1, # 0,1 0: 效果上相当于 top_p=0 或 temperature=0
 )
 print(response.choices[0].message.content)
 ```
